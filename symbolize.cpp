@@ -37,6 +37,7 @@ namespace symbolize {
         // todo: link do symtab
         hdr->sh_type = SHT_REL;
         hdr->sh_flags |= SHF_INFO_LINK;
+        hdr->sh_addralign = 4;
         hdr->sh_entsize = sizeof(Elf32_Rel);
     }
 
@@ -252,8 +253,10 @@ namespace symbolize {
             int pad_len = raw_len % align;
             char pad[pad_len]{};
             buf_add(&raw, raw_len, &pad, pad_len);
+
             // Fix undefined header values
             shdr()->sh_offset = raw_len;
+            shdr()->sh_addr = 0;
 
             str_section *strtab;
             rel_section *reltab;
@@ -284,14 +287,13 @@ namespace symbolize {
 
             buf_add(&raw, raw_len, s->data, s->data_len);
             shdr()->sh_size = raw_len - shdr()->sh_offset;
+            if (shdr()->sh_type == SHT_NULL) {
+                shdr()->sh_offset = 0;
+            }
             idx++;
         }
 
-
         // e_entry
-
-        // section string table entries
-        // symbol strtab
 
         FILE *f = fopen(file.c_str(), "wb");
         int nwrote = 0;
@@ -327,13 +329,14 @@ namespace symbolize {
             return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
         });
 
-
         while (shdr()->sh_info < symtab->symbols.size()
                && ELF32_ST_BIND(symtab->symbols[shdr()->sh_info].symbol.st_info) == STB_LOCAL)
             shdr()->sh_info++;
 
-        for (auto sym: symtab->symbols)
-            buf_add(&raw, raw_len, &sym, sizeof(sym));
+        for (auto sym: symtab->symbols) {
+            sym.symbol.st_value = 0;
+            buf_add(&raw, raw_len, &sym.symbol, sizeof(sym.symbol));
+        }
     }
 
     str_section *program::add_str_section() {
@@ -386,17 +389,11 @@ namespace symbolize {
                 continue;
 
             if (sym.st_shndx == shndx) {
-                std::cout << std::hex << sym.st_value;
-                std::cout << std::endl;
                 assert(sym.st_value >= s->hdr->sh_addr);
                 if (s->hdr->sh_type != SHT_NOBITS) {
                     assert(sym.st_value + sym.st_size <= s->hdr->sh_addr + s->hdr->sh_size);
                 }
-                syms.push_back({
-                    .symbol = sym,
-                    .old_idx = idx,
-                    .new_idx = 0,
-                });
+                syms.push_back(elf_sym);
             }
         }
 

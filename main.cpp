@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <elf.h>
+#include <optional>
 #include <vector>
 
 #include "symbolize.h"
@@ -27,12 +28,19 @@ namespace {
         return p.add_rel_section(name, s_idx);
     }
 
-    section* sec_for(program& p, Elf32_Rel rel) {
+    section* sec_for(program& p, Elf32_Addr addr) {
         for (auto s : p.sections)
             // TODO: rozmiary relokacji
-            if (s->hdr->sh_addr >= rel.r_offset && rel.r_offset + 4 <= s->hdr->sh_addr + s->hdr->sh_size)
+            if (s->hdr->sh_addr <= addr && addr + 4 <= s->hdr->sh_addr + s->hdr->sh_size)
                 return s;
         return nullptr;
+    }
+
+    optional<elf_symbol> sym_for(program& p, int old_idx) {
+        for (auto s : p.symtab->symbols)
+            if (s.old_idx == old_idx)
+                return s;
+        return {};
     }
 
     void convert_rel(program const& in, program& out) {
@@ -43,14 +51,17 @@ namespace {
 
             rel_section* reltab = (rel_section*)s;
             for (auto rel : reltab->rels) {
-                auto sec = sec_for(out, rel);
+                auto sec = sec_for(out, rel.r_offset);
                 auto outrel = rel_for(out, sec);
-
-
+                auto outsym = sym_for(out, ELF32_R_SYM(rel.r_info));
+                if (!outsym.has_value()) {
+                    log("Relocation for unknown symbol old_idx=", ELF32_R_SYM(rel.r_info));
+                    continue;
+                }
 
                 outrel->rels.push_back(Elf32_Rel{
                     .r_offset = rel.r_offset - sec->hdr->sh_addr,
-                    .r_info = rel.r_info // TODO!
+                    .r_info = ELF32_R_INFO(outsym->new_idx, ELF32_R_TYPE(rel.r_info)),
                 });
             }
         }
@@ -62,13 +73,6 @@ namespace {
         output.ehdr.e_version = in.ehdr.e_version;
         output.init();
 
-/*        vector<Elf32_Sym*> working_sym;
-        for (auto s : in.symtab) {
-            Elf32_Sym* sym = new Elf32_Sym();
-            memcpy(sym, s, sizeof(Elf32_Sym));
-            working_sym.push_back(sym);
-        }*/
-
         int shndx = 0;
         for (auto s : in.sections) {
             // sh_align - tylko dla pierwszej sekcji w rozbijanej grupie
@@ -77,9 +81,9 @@ namespace {
             if (s->hdr->sh_type == SHT_PROGBITS || s->hdr->sh_type == SHT_NOBITS) {
                 auto syms = program::symbols_in_section_asc(s, in.symtab->symbols, shndx);
                 bool is_first = true;
+                int size_sum = 0;
                 for (auto sym : syms) {
                     // symbol new name
-                    //string name = sym_name(s, &sym);
                     string name(&in.strtab->data[sym.symbol.st_name]);
                     Elf32_Word name_off = output.strtab->last_offset();
                     output.strtab->entries.push_back(name);
@@ -91,12 +95,13 @@ namespace {
                     sec->hdr->sh_type = s->hdr->sh_type;
                     sec->hdr->sh_flags = s->hdr->sh_flags;
                     sec->hdr->sh_size = sym.symbol.st_size;
-                    sec->hdr->sh_addr = s->hdr->sh_addr;
+                    sec->hdr->sh_addr = s->hdr->sh_addr + size_sum;
                     if (is_first) {
                         sec->hdr->sh_addralign = s->hdr->sh_addralign;
                         is_first = false;
                     }
                     sec->append(s->data, sec->hdr->sh_size);
+                    size_sum += sec->hdr->sh_size;
 
                     Elf32_Sym rel_sym{
                         .st_name = name_off,
