@@ -74,7 +74,7 @@ namespace symbolize {
         int index_of(section* s);
 
         static vector<elf_symbol> symbols_in_section_asc(section *s, vector<elf_symbol> section_syms, int shndx);
-
+        void sort_symtabs();
     private:
         str_section* load_strtab(Elf32_Shdr shdr);
         void add_section(section*);
@@ -94,6 +94,15 @@ namespace symbolize {
         (std::cout << ... << msg);
         std::cout << std::endl;
     }
+
+    auto const SYMTAB_CMP = [](elf_symbol a, elf_symbol b) {
+        if (ELF32_ST_BIND(a.symbol.st_info) == ELF32_ST_BIND(b.symbol.st_info)) {
+            if (a.symbol.st_shndx == b.symbol.st_shndx)
+                return a.symbol.st_value < b.symbol.st_value;
+            return a.symbol.st_shndx < b.symbol.st_shndx;
+        }
+        return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
+    };
 }
 
 #endif //SYMBOLIZE_H

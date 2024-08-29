@@ -11,6 +11,8 @@ namespace symbolize {
     }
 
     void section::append(char const *mem, int len) {
+        if (len == 0)
+            return;
         char *ndata = new char[len + data_len];
         if (data_len > 0)
             memcpy(ndata, data, data_len);
@@ -67,6 +69,12 @@ namespace symbolize {
         for (const string& s : entries) {
             if (off == coff)
                 return s;
+            if (off == coff + s.size())
+                return "";
+            if (off > coff && off < coff + s.size()) {
+                int skip = off - coff;
+                return s.substr(skip, s.size() - skip);
+            }
             coff += s.size() + 1;
         }
         assert(false);
@@ -103,12 +111,13 @@ namespace symbolize {
         empty_sec->hdr = empty_hdr;
 
         symtab = add_sym_section();
-        strtab = add_str_section();
-        shstrtab = add_str_section();
+        symtab->symbols.push_back({});
 
-        shstrtab->entries.push_back("");
+        strtab = add_str_section();
         strtab->entries.push_back("");
 
+        shstrtab = add_str_section();
+        shstrtab->entries.push_back("");
         shstrtab->entries.push_back(".symtab");
         shstrtab->entries.push_back(".strtab");
         shstrtab->entries.push_back(".shstrtab");
@@ -247,7 +256,7 @@ namespace symbolize {
         int idx = 0;
         for (auto s: sections) {
             // Has to be this way to reflect changes after writing to raw.
-            auto shdr = [this, idx]() { return (Elf32_Shdr *) &raw[ehdr.e_shoff + idx * ehdr.e_shentsize]; };
+            auto shdr = [this, idx] { return (Elf32_Shdr *) &this->raw[ehdr.e_shoff + idx * ehdr.e_shentsize]; };
 
             int align = max((Elf32_Word) 1, s->hdr->sh_addralign);
             int pad_len = raw_len % align;
@@ -287,7 +296,7 @@ namespace symbolize {
 
             buf_add(&raw, raw_len, s->data, s->data_len);
             shdr()->sh_size = raw_len - shdr()->sh_offset;
-            if (shdr()->sh_type == SHT_NULL) {
+            if (shdr()->sh_type == SHT_NULL || shdr()->sh_type == SHT_NOBITS) {
                 shdr()->sh_offset = 0;
             }
             idx++;
@@ -317,18 +326,23 @@ namespace symbolize {
         shdrs.push_back(sptr->hdr);
     }
 
+    void program::sort_symtabs() {
+        for (auto s: sections) {
+            if (s->hdr->sh_type != SHT_SYMTAB)
+                continue;
+
+            sym_section *symtab = (sym_section*)s;
+            sort(symtab->symbols.begin(), symtab->symbols.end(), SYMTAB_CMP);
+            // Now fix symbol positions
+            for (int i = 0; i < symtab->symbols.size(); i++)
+                symtab->symbols[i].new_idx = i;
+        }
+    }
+
     void program::save_symtab(function<Elf32_Shdr*(void)> shdr, int strtab_nr, sym_section *symtab) {
         shdr()->sh_link = strtab_nr;
-        // One greater than the symbol table index of the last local symbol,STB_LOCAL
-        sort(symtab->symbols.begin(), symtab->symbols.end(), [](elf_symbol a, elf_symbol b) {
-            if (ELF32_ST_BIND(a.symbol.st_info) == ELF32_ST_BIND(b.symbol.st_info)) {
-                if (a.symbol.st_shndx == b.symbol.st_shndx)
-                    return a.symbol.st_value < b.symbol.st_value;
-                return a.symbol.st_shndx < b.symbol.st_shndx;
-            }
-            return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
-        });
 
+        // One greater than the symbol table index of the last local symbol,STB_LOCAL
         while (shdr()->sh_info < symtab->symbols.size()
                && ELF32_ST_BIND(symtab->symbols[shdr()->sh_info].symbol.st_info) == STB_LOCAL)
             shdr()->sh_info++;
@@ -380,25 +394,26 @@ namespace symbolize {
 
     vector<elf_symbol> program::symbols_in_section_asc(section *s, vector<elf_symbol> section_syms, int shndx) {
         vector<elf_symbol> syms;
-        int idx = -1;
-        for (elf_symbol elf_sym: section_syms) {
-            ++idx;
-            Elf32_Sym sym = elf_sym.symbol;
-            int type = ELF32_ST_TYPE(sym.st_info);
-            if (type != STT_FUNC && type != STT_OBJECT)
-                continue;
-
-            if (sym.st_shndx == shndx) {
-                assert(sym.st_value >= s->hdr->sh_addr);
-                if (s->hdr->sh_type != SHT_NOBITS) {
-                    assert(sym.st_value + sym.st_size <= s->hdr->sh_addr + s->hdr->sh_size);
-                }
-                syms.push_back(elf_sym);
-            }
-        }
+        std::copy_if(section_syms.begin(), section_syms.end(), std::back_inserter(syms), [&](elf_symbol const& sym) {
+            bool res = sym.symbol.st_shndx == shndx;
+            if (res)
+                assert(sym.symbol.st_value >= s->hdr->sh_addr);
+            return res;
+        });
 
         sort(syms.begin(), syms.end(), [](elf_symbol a, elf_symbol b) {
-            return a.symbol.st_value <= b.symbol.st_value;
+            if (a.symbol.st_value != b.symbol.st_value)
+                return a.symbol.st_value < b.symbol.st_value;
+            int a_type = ELF32_ST_TYPE(a.symbol.st_info);
+            int b_type = ELF32_ST_TYPE(a.symbol.st_info);
+            if ((a_type == STT_FUNC || a_type == STT_OBJECT)
+                && (b_type == STT_FUNC || b_type == STT_OBJECT))
+                return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
+            if (a_type == STT_FUNC || a_type == STT_OBJECT)
+                return true;
+            if (b_type == STT_FUNC || b_type == STT_OBJECT)
+                return false;
+            return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
         });
         return syms;
     }
