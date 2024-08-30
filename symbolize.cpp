@@ -212,6 +212,12 @@ namespace symbolize {
             sections.push_back(s);
             idx++;
         }
+
+        // set GOT
+        for (auto s : sections) {
+            if (shstrtab->str_by_offset(s->hdr->sh_name) == ".got")
+                got = s;
+        }
     }
 
     void buf_add(char **buf, int &buf_sz, void *data, int len) {
@@ -379,6 +385,22 @@ namespace symbolize {
             if (sections[i] == s)
                 return i;
         return -1;
+    }
+
+    vector<rel_section *> program::find_rels() {
+        vector<rel_section*> rels;
+        for (auto s : sections)
+            if (s->hdr->sh_type == SHT_REL)
+                rels.push_back((rel_section*) s);
+        return rels;
+    }
+
+    void program::add_symbol(string name, elf_symbol& sym) {
+        int name_off = strtab->last_offset();
+        sym.symbol.st_name = name_off;
+        sym.new_idx = symtab->symbols.size();
+        strtab->entries.push_back(name);
+        symtab->symbols.push_back(sym);
     }
 
     str_section *program::load_strtab(Elf32_Shdr shdr) {

@@ -30,6 +30,7 @@ namespace symbolize {
     public:
         sym_section();
         vector<elf_symbol> symbols;
+        int got_off_idx;
     };
 
     class rel_section : public section {
@@ -57,6 +58,7 @@ namespace symbolize {
         vector<Elf32_Shdr*> shdrs;
         vector<Elf32_Phdr*> phdrs;
         sym_section *symtab;
+        section *got = nullptr;
         str_section *strtab;
         str_section *shstrtab = nullptr;
 
@@ -72,9 +74,13 @@ namespace symbolize {
         sym_section* add_sym_section();
         rel_section* add_rel_section(string name_suffix, int sh_link);
         int index_of(section* s);
+        vector<rel_section*> find_rels();
+
+        void add_symbol(string name, elf_symbol &sym);
 
         static vector<elf_symbol> symbols_in_section_asc(section *s, vector<elf_symbol> section_syms, int shndx);
         void sort_symtabs();
+
     private:
         str_section* load_strtab(Elf32_Shdr shdr);
         void add_section(section*);
