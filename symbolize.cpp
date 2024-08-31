@@ -403,6 +403,15 @@ namespace symbolize {
         symtab->symbols.push_back(sym);
     }
 
+    vector<elf_symbol> program::symbols_in_section_asc(int shndx) {
+        vector<elf_symbol> syms;
+        for (auto s : symtab->symbols)
+            if (s.symbol.st_shndx == shndx)
+                syms.push_back(s);
+        return syms;
+    }
+
+
     str_section *program::load_strtab(Elf32_Shdr shdr) {
         auto strtab = new str_section();
         int upto = shdr.sh_offset + shdr.sh_size;
@@ -423,20 +432,7 @@ namespace symbolize {
             return res;
         });
 
-        sort(syms.begin(), syms.end(), [](elf_symbol a, elf_symbol b) {
-            if (a.symbol.st_value != b.symbol.st_value)
-                return a.symbol.st_value < b.symbol.st_value;
-            int a_type = ELF32_ST_TYPE(a.symbol.st_info);
-            int b_type = ELF32_ST_TYPE(a.symbol.st_info);
-            if ((a_type == STT_FUNC || a_type == STT_OBJECT)
-                && (b_type == STT_FUNC || b_type == STT_OBJECT))
-                return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
-            if (a_type == STT_FUNC || a_type == STT_OBJECT)
-                return true;
-            if (b_type == STT_FUNC || b_type == STT_OBJECT)
-                return false;
-            return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
-        });
+        sort(syms.begin(), syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
         return syms;
     }
 }

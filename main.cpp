@@ -6,6 +6,7 @@
 #include <elf.h>
 #include <iomanip>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -15,7 +16,7 @@ namespace {
     using namespace symbolize;
 
 
-    char get_symbol_code(string section_name, section *containing, Elf32_Sym sym) {
+    char get_symbol_code(string section_name, Elf32_Sym sym) {
         char code = 'U';
         int binding = ELF32_ST_BIND(sym.st_info);
         if (sym.st_shndx == SHN_ABS)
@@ -41,10 +42,21 @@ namespace {
         return code;
     }
 
-    string symbol_name(string section_name, section *containing_section, Elf32_Sym sym) {
+    string symbol_name(string containing_section_name, Elf32_Sym sym) {
         std::stringstream ss;
-        ss << section_name << ".x" << std::hex << std::setfill('0') << std::setw(8) << sym.st_value;
-        return ss.str() + std::string(1, get_symbol_code(section_name, containing_section, sym));
+        ss << "x" << std::hex << std::setfill('0') << std::setw(8) << sym.st_value;
+        ss << get_symbol_code(containing_section_name, sym);
+        return ss.str();
+    }
+
+    string out_section_name(string section_name, Elf32_Addr addr) {
+        std::stringstream ss;
+        ss << section_name << ".x" << std::hex << std::setfill('0') << std::setw(8) << addr;
+        return ss.str();
+    }
+
+    string out_section_name(string section_name, Elf32_Sym sym) {
+        return section_name + "." + symbol_name(section_name, sym);
     }
 
     rel_section* rel_for(program& p, section* s) {
@@ -171,59 +183,76 @@ namespace {
         return sec_id;
     }
 
-    void parse_progbits(program& in, program& out, section *s, const string& s_name, int shndx) {
-        vector<elf_symbol> filtered_syms;
-        std::copy_if(in.symtab->symbols.begin(), in.symtab->symbols.end(), std::back_inserter(filtered_syms), [&](elf_symbol sym) {
-            string symbol_name = in.strtab->str_by_offset(sym.symbol.st_name);
-            return symbol_name != "__stack";
+    vector<elf_symbol> section_symbols_asc(program& in, int shndx) {
+        vector<elf_symbol> sec_syms;
+        std::copy_if(in.symtab->symbols.begin(), in.symtab->symbols.end(), std::back_inserter(sec_syms), [&](elf_symbol sym) {
+            int t = ELF32_ST_TYPE(sym.symbol.st_info);
+            return (t == STT_FUNC || t == STT_OBJECT)
+                && sym.symbol.st_size > 0
+                && sym.symbol.st_shndx == shndx;
         });
+        sort(sec_syms.begin(), sec_syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
+        return sec_syms;
+    }
 
-        auto syms = program::symbols_in_section_asc(s, filtered_syms, shndx);
-        bool is_first = true;
-        int size_sum = 0;
-        Elf32_Section sec_id = -1;
+    // - st_value na sztywno
+    // - rozmiar symboli
+    void parse_file_and_mem(program& in, program& out, section *s, int shndx) {
+        vector<elf_symbol> ssyms = section_symbols_asc(in, shndx);
+        vector<elf_symbol> all_syms = in.symbols_in_section_asc(shndx);
+        string s_name = in.shstrtab->str_by_offset(s->hdr->sh_name);
+        const Elf32_Addr max_s_addr = s->hdr->sh_size + s->hdr->sh_addr;
 
-        if (!should_break_symbols_into_sections(s, s_name)) {
-            sec_id = out.sections.size();
-            raw_move_section(s, s_name, out);
-        }
+        int ssyms_ptr = 0, all_syms_ptr = 0;
+        section *current;
+        int shndx_current;
+        Elf32_Addr s_change_addr = s->hdr->sh_addr;
+        for (int i = 0; i < s->hdr->sh_size; i++) {
+            Elf32_Addr addr = s->hdr->sh_addr + i;
+            bool started_new = false;
 
-        for (int i = 0; i < syms.size(); i++) {
-            auto sym = syms[i];
-            if (sym.symbol.st_value < s->hdr->sh_addr)
-                continue;
-            int real_symbol_size = i+1 < syms.size()
-                    ? syms[i+1].symbol.st_value - syms[i].symbol.st_value
-                    : s->hdr->sh_size - size_sum;
-            if (real_symbol_size == 0)
-                continue;
+            // start a new section
+            if (ssyms_ptr < ssyms.size() && ssyms[ssyms_ptr].symbol.st_value == addr) {
+                elf_symbol ssym = ssyms[ssyms_ptr];
+                current = out.add_section(out_section_name(s_name, ssym.symbol));
 
-            Elf32_Word name_off = out.strtab->last_offset();
-            string sym_name = symbol_name(s_name, s, sym.symbol);
-            out.strtab->entries.push_back(sym_name);
+                started_new = true;
+                s_change_addr = addr + ssym.symbol.st_size;
+                ssyms_ptr++;
+            } else if (addr == s_change_addr) {
+                current = out.add_section(out_section_name(s_name, addr));
 
-            Elf32_Word out_sym_size = sym.symbol.st_size;
-            if (should_break_symbols_into_sections(s, s_name)) {
-                out_sym_size = out_sym_size > 0 ? out_sym_size : real_symbol_size;
-                sec_id = break_symbol_into_section(out, sym_name, s, size_sum, is_first, out_sym_size);
-                size_sum += out_sym_size;
+                started_new = true;
+                s_change_addr = max_s_addr;
             }
 
-            Elf32_Sym out_sym{
-                .st_name = name_off,
-                .st_value = sym.symbol.st_value,
-                .st_size = out_sym_size,
-                .st_info = sym.symbol.st_info,
-                .st_other = sym.symbol.st_other,
-                .st_shndx = sec_id,
-            };
-            int sidx = out.symtab->symbols.size();
-            out.symtab->symbols.push_back(elf_symbol{
-                .symbol = out_sym,
-                .old_idx = sym.old_idx,
-                .new_idx = sidx
-            });
-            is_first = false;
+            if (started_new) {
+                if (i == 0) {
+                    current->hdr->sh_addralign = s->hdr->sh_addralign;
+                }
+                current->hdr->sh_addr = addr;
+                current->hdr->sh_type = s->hdr->sh_type;
+                current->hdr->sh_flags = s->hdr->sh_flags;
+                shndx_current = out.sections.size()-1;
+            }
+
+            // add symbols
+            if (all_syms_ptr < all_syms.size() && all_syms[all_syms_ptr].symbol.st_value == addr) {
+                auto in_sym = all_syms[all_syms_ptr];
+                string name = symbol_name(s_name, in_sym.symbol);
+                auto sym = elf_symbol{
+                    .symbol = in_sym.symbol,
+                    .old_idx = in_sym.old_idx,
+                    .new_idx = 0,
+                };
+                sym.symbol.st_shndx = shndx_current;
+                out.add_symbol(name, sym);
+                all_syms_ptr++;
+            }
+
+            // update pointers
+            current->hdr->sh_size++;
+            current->append(&s->data[i], 1);
         }
     }
 
@@ -268,7 +297,7 @@ namespace {
                 if (in_section_name == ".got") {
                     // skip the section
                 } else {
-                    parse_progbits(in, output, s, in_section_name, shndx);
+                    parse_file_and_mem(in, output, s, shndx);
                 }
             } else if (s->hdr->sh_type == SHT_NOBITS) {
                 if (in_section_name != ".stack") {
