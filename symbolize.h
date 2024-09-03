@@ -125,6 +125,17 @@ namespace symbolize {
             return false;
         return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
     };
+
+    auto const IS_A_BETTER_THAN_B = [](elf_symbol a, elf_symbol b) {
+        int a_type = ELF32_ST_TYPE(a.symbol.st_info);
+        int b_type = ELF32_ST_TYPE(a.symbol.st_info);
+        if (a.symbol.st_size == b.symbol.st_size) {
+            if (a_type == b_type)
+                return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
+            return a_type == STT_FUNC || a_type == STT_OBJECT;
+        }
+        return a.symbol.st_size > b.symbol.st_size;
+    };
 }
 
 #endif //SYMBOLIZE_H

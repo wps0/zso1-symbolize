@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstring>
 #include <functional>
+#include <map>
 
 namespace symbolize {
     section::section() {
@@ -271,7 +272,7 @@ namespace symbolize {
 
             // Fix undefined header values
             shdr()->sh_offset = raw_len;
-            shdr()->sh_addr = 0;
+            //shdr()->sh_addr = 0;
 
             str_section *strtab;
             rel_section *reltab;
@@ -301,9 +302,10 @@ namespace symbolize {
             }
 
             buf_add(&raw, raw_len, s->data, s->data_len);
-            shdr()->sh_size = raw_len - shdr()->sh_offset;
             if (shdr()->sh_type == SHT_NULL || shdr()->sh_type == SHT_NOBITS) {
                 shdr()->sh_offset = 0;
+            } else {
+                shdr()->sh_size = raw_len - shdr()->sh_offset;
             }
             idx++;
         }
@@ -354,7 +356,6 @@ namespace symbolize {
             shdr()->sh_info++;
 
         for (auto sym: symtab->symbols) {
-            sym.symbol.st_value = 0;
             buf_add(&raw, raw_len, &sym.symbol, sizeof(sym.symbol));
         }
     }
@@ -408,6 +409,7 @@ namespace symbolize {
         for (auto s : symtab->symbols)
             if (s.symbol.st_shndx == shndx)
                 syms.push_back(s);
+        sort(syms.begin(), syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
         return syms;
     }
 
@@ -423,16 +425,4 @@ namespace symbolize {
         return strtab;
     }
 
-    vector<elf_symbol> program::symbols_in_section_asc(section *s, vector<elf_symbol> section_syms, int shndx) {
-        vector<elf_symbol> syms;
-        std::copy_if(section_syms.begin(), section_syms.end(), std::back_inserter(syms), [&](elf_symbol const& sym) {
-            bool res = sym.symbol.st_shndx == shndx;
-            if (res)
-                assert(sym.symbol.st_value >= s->hdr->sh_addr);
-            return res;
-        });
-
-        sort(syms.begin(), syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
-        return syms;
-    }
 }
