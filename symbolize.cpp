@@ -264,6 +264,12 @@ namespace symbolize {
         for (auto s: sections) {
             // Has to be this way to reflect changes after writing to raw.
             auto shdr = [this, idx] { return (Elf32_Shdr *) &this->raw[ehdr.e_shoff + idx * ehdr.e_shentsize]; };
+            string s_name = shstrtab->str_by_offset(shdr()->sh_name);
+
+            // Stack is initialized by picolib.ld, but the section
+            // is needed for associating symbols with sections.
+            if (s_name == ".stack")
+                shdr()->sh_size = 0;
 
             int align = max((Elf32_Word) 1, s->hdr->sh_addralign);
             int pad_len = raw_len % align;

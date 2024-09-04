@@ -73,10 +73,10 @@ namespace {
         return p.add_rel_section(name, s_idx);
     }
 
-    pair<int, section*> sec_for(program& p, Elf32_Addr addr) {
+    pair<int, section*> sec_for(program& p, Elf32_Addr addr, bool top_addr_incl = false) {
         int i = 0;
         for (auto s : p.sections) {
-            if (s->hdr->sh_addr <= addr && addr < s->hdr->sh_addr + s->hdr->sh_size)
+            if (s->hdr->sh_addr <= addr && addr < s->hdr->sh_addr + s->hdr->sh_size + top_addr_incl)
                 return {i, s};
             i++;
         }
@@ -174,15 +174,6 @@ namespace {
         });
         sort(sec_syms.begin(), sec_syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
         return sec_syms;
-    }
-
-    vector<elf_symbol> symbols_in_section_by_addr_asc(program& in, section *s) {
-        vector<elf_symbol> syms;
-        for (auto sym : in.symtab->symbols)
-            if (s->hdr->sh_addr <= sym.symbol.st_value && sym.symbol.st_value < s->hdr->sh_addr + s->hdr->sh_size)
-                syms.push_back(sym);
-        sort(syms.begin(), syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
-        return syms;
     }
 
     void filter_out_unreachable(program& in, vector<elf_symbol> &symbols) {
@@ -283,8 +274,8 @@ namespace {
 
                 if (nrs.count(in_sym.old_idx) > 0)
                     nrs.erase(in_sym.old_idx);
-                else
-                    log("Warning: redundant symbol created");
+                //else
+                    //log("Warning: redundant symbol created");
             }
 
             // update pointers
@@ -302,10 +293,6 @@ namespace {
         int name = outsec->hdr->sh_name;
         *outsec->hdr = *s->hdr;
         outsec->hdr->sh_name = name;
-        // Stack is initialized by picolib.ld, but the section
-        // is needed for associating symbols with sections.
-        if (s_name == ".stack")
-            outsec->hdr->sh_size = 0;
     }
 
     void add_got_symbol_if_needed(program& in, program& out) {
@@ -369,6 +356,24 @@ namespace {
         return sym_idxes;
     }
 
+    void add_start_symbol(program& in, program& out, set<int> nrs) {
+        int sidx = 0;
+        for (auto s : in.symtab->symbols) {
+            if (in.strtab->str_by_offset(s.symbol.st_name) == "_start") {
+                sidx = s.old_idx;
+                break;
+            }
+        }
+
+        for (auto sym : out.symtab->symbols)
+            if (sidx == sym.old_idx) {
+                log("_start found!");
+                out.add_symbol("_start", sym);
+                if (nrs.count(sidx) > 0)
+                    nrs.erase(sidx);
+            }
+    }
+
     void solve(program in, string out) {
         program output{};
         output.ehdr.e_machine = in.ehdr.e_machine;
@@ -394,20 +399,35 @@ namespace {
             shndx++;
         }
 
+        // add a dummy _start symbol, for the sake of e_entry
+        add_start_symbol(in, output, nrs);
+
         for (int i : nrs) {
             auto sym = in.symtab->symbols[i];
             if (sym.symbol.st_shndx == SHN_ABS) {
                 //sym.symbol.st_size = output.symtab->symbols.size();
                 //output.symtab->symbols.push_back(sym);
             } else {
-                auto insec = sec_for(in, sym.symbol.st_value);
-                auto outsec = sec_for(output, sym.symbol.st_value);
-                if (insec.second != nullptr
-                    && outsec.second != nullptr
-                    && sym.symbol.st_value >= outsec.second->hdr->sh_addr) {
+                // For symbols at the beginning of a 0-sized section.
+                auto insec1 = sec_for(in, sym.symbol.st_value);
+                auto insec2 = sec_for(in, sym.symbol.st_value, true);
+                // For symbols exactly after the section.
+                auto outsec1 = sec_for(output, sym.symbol.st_value);
+                auto outsec2 = sec_for(output, sym.symbol.st_value, true);
+                if ((insec1.second != nullptr || insec2.second != nullptr)
+                    && (outsec1.second != nullptr || outsec2.second != nullptr)) {
+                    auto insec = insec1.second == nullptr ? insec2 : insec1;
+                    auto outsec = outsec1.second == nullptr ? outsec2 : outsec1;
+                    assert(sym.symbol.st_value >= outsec.second->hdr->sh_addr);
                     string sec_name = in.shstrtab->str_by_offset(insec.second->hdr->sh_name);
                     string sname = out_section_name(sec_name, sym.symbol);
-                    sym.symbol.st_value -= outsec.second->hdr->sh_addr;
+                    // For sections of size 0, when changing the size, linker
+                    // also changes symbol addresses after the end
+                    // of the section. So, for .stack, this is needed
+                    if (outsec.second->hdr->sh_type == SHT_NOBITS)
+                        sym.symbol.st_value = 0;
+                    else
+                        sym.symbol.st_value -= outsec.second->hdr->sh_addr;
                     sym.symbol.st_shndx = outsec.first;
                     output.add_symbol(sname, sym);
                 }
