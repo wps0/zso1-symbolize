@@ -73,7 +73,16 @@ namespace {
         return p.add_rel_section(name, s_idx);
     }
 
-    pair<int, section*> sec_for(program& p, Elf32_Addr addr, bool top_addr_incl = false) {
+    pair<int, section*> sec_for(program& p, Elf32_Addr addr, int shndx = 0, bool top_addr_incl = false) {
+        if (shndx > 0) {
+            int idx = 0;
+            for (auto s : p.sections) {
+                if (idx == shndx && s->hdr->sh_addr <= addr && addr <= s->hdr->sh_addr + s->hdr->sh_size)
+                    return {idx, s};
+                idx++;
+            }
+        }
+
         int i = 0;
         for (auto s : p.sections) {
             if (s->hdr->sh_addr <= addr && addr < s->hdr->sh_addr + s->hdr->sh_size + top_addr_incl)
@@ -87,30 +96,50 @@ namespace {
         for (auto s : out.symtab->symbols)
             if (s.old_idx == old_idx)
                 return s;
-        Elf32_Addr old_addr = in.symtab->symbols[old_idx].symbol.st_value;
-        for (auto s : out.symtab->symbols)
-            if (in.symtab->symbols[s.old_idx].symbol.st_value == old_addr)
+
+        Elf32_Sym old_s_idx = in.symtab->symbols[old_idx].symbol;
+        for (auto s : out.symtab->symbols) {
+            Elf32_Sym s_old = in.symtab->symbols[s.old_idx].symbol;
+            int bind_s = ELF32_ST_BIND(s_old.st_info);
+            int bind_old = ELF32_ST_BIND(old_s_idx.st_info);
+            if (s_old.st_value == old_s_idx.st_value && bind_s == bind_old)
                 return s;
+        }
+
+        for (auto s : out.symtab->symbols) {
+            Elf32_Sym s_old = in.symtab->symbols[s.old_idx].symbol;
+            if (s_old.st_value == old_s_idx.st_value)
+                return s;
+        }
+
         return {};
+    }
+
+    Elf32_Off got_symbol_off(program& in, Elf32_Sym symbol) {
+        for (int i = 0; i < in.got->hdr->sh_size; i += 4) {
+            Elf32_Addr* addr = (Elf32_Addr*)&in.got->data[i];
+            if (*addr == symbol.st_value)
+                return i;
+        }
+        log("No GOT entry for " + std::to_string(symbol.st_value));
+        return symbol.st_value;
     }
 
     void fix_segment(program& in, program &out, Elf32_Rel in_rel, Elf32_Rel out_rel, elf_symbol& out_sym, section* outsec) {
         Elf32_Word* value = (Elf32_Word*) &outsec->data[out_rel.r_offset];
+        // A - The addend used to compute the value of the relocatable field.
+        int a = 0;
         // S - The value of the symbol whose index resides in the relocation entry.
         Elf32_Addr s = in.symtab->symbols[out_sym.old_idx].symbol.st_value;
         // P - The section offset or address of the storage unit being relocated, computed using r_offset.
         Elf32_Off p = in_rel.r_offset;
         // GOT - The address of the global offset table.
         Elf32_Off got = 0;
-        // A - The addend used to compute the value of the relocatable field.
-        int a = 0;
-        // G - The offset into the global offset table at which the address of the relocation entry's
-        //  symbol resides during execution
-        int g = 0;
+        // L - The section offset or address of the procedure linkage table entry for a symbol.
+        Elf32_Off l = 0;
 
         if (in.got != nullptr) {
             got = in.got->hdr->sh_addr;
-            g = *value; // TODO: addend?
         }
 
         int type = ELF32_R_TYPE(in_rel.r_info);
@@ -118,14 +147,20 @@ namespace {
             // S + A
             a = *value - s;
         } else if (type == R_386_PC32) {
-            // S + A - P
             a =  *value - s + p;
         } else if (type == R_386_GOTPC) {
             a = *value - got + p;
         } else if (type == R_386_GOTOFF) {
             a = *value - s + got;
         } else if (type == R_386_GOT32) {
+            // G - The offset into the global offset table at which the address of the relocation entry's
+            //  symbol resides during execution
+            int g = got_symbol_off(in, in.symtab->symbols[out_sym.old_idx].symbol);
             a = *value - g;
+        } else if (type == R_386_PLT32) {
+
+        } else {
+            log("Unsupported relo type: ", type);
         }
 
         *value = a;
@@ -140,7 +175,9 @@ namespace {
                 auto outsec = sec_for(out, rel.r_offset);
                 auto outrel = rel_for(out, outsec.second);
                 auto outsym = sym_for(in, out, r_sym);
-                if (!outsym.has_value()) {
+                if (outsym.has_value() && outsym.value().old_idx == 0) {
+                    log("Warning: rel for an empty symbol");
+                } else if (!outsym.has_value()) {
                     log("Relocation for unknown symbol old_idx=", r_sym);
                     outsym = optional(elf_symbol{});
                 }
@@ -155,15 +192,6 @@ namespace {
         }
     }
 
-    bool is_relo_target(program& in, int symidx) {
-        auto rss = in.find_rels();
-        for (auto rs : rss)
-            for (auto r : rs->rels)
-                if (ELF32_R_SYM(r.r_info) == symidx)
-                    return true;
-        return false;
-    }
-
     vector<elf_symbol> section_symbols_asc(program& in, int shndx) {
         vector<elf_symbol> sec_syms;
         std::copy_if(in.symtab->symbols.begin(), in.symtab->symbols.end(), std::back_inserter(sec_syms), [&](elf_symbol sym) {
@@ -174,13 +202,6 @@ namespace {
         });
         sort(sec_syms.begin(), sec_syms.end(), SYMBOLS_ASC_BY_ADDR_CMP);
         return sec_syms;
-    }
-
-    void filter_out_unreachable(program& in, vector<elf_symbol> &symbols) {
-        remove_if(symbols.begin(), symbols.end(), [&](elf_symbol s) {
-            int type = ELF32_ST_TYPE(s.symbol.st_info);
-            return !is_relo_target(in, s.old_idx) && type != STT_OBJECT && type != STT_FILE && s.symbol.st_size == 0;
-        });
     }
 
     vector<pair<string, elf_symbol>> remove_duplicates(vector<pair<string, elf_symbol>>& symbols) {
@@ -293,6 +314,7 @@ namespace {
         int name = outsec->hdr->sh_name;
         *outsec->hdr = *s->hdr;
         outsec->hdr->sh_name = name;
+        outsec->old_idx = shndx;
     }
 
     void add_got_symbol_if_needed(program& in, program& out) {
@@ -320,39 +342,41 @@ namespace {
         }
     }
 
+    void pick(vector<elf_symbol>& to, vector<elf_symbol>& outof, std::function<bool(elf_symbol)> filter) {
+        vector<elf_symbol> matching;
+        copy_if(outof.begin(), outof.end(), std::back_inserter(matching), filter);
+        remove_if(outof.begin(), outof.end(), filter);
+
+        for (auto x : matching) {
+            bool contains = false;
+            for (auto tx : to)
+                if (tx == x)
+                    contains = true;
+            if (!contains)
+                to.push_back(x);
+        }
+    }
+
     set<int> non_redundant_symbols(program& in) {
         auto reltabs = in.find_rels();
-        map<Elf32_Addr, elf_symbol>  syms;
-        for (int i = 0; i < in.symtab->symbols.size(); i++) {
-            auto s = in.symtab->symbols[i];
-            if (ELF32_ST_TYPE(s.symbol.st_info) == STT_FUNC || ELF32_ST_TYPE(s.symbol.st_info) == STT_OBJECT) {
-                Elf32_Addr addr = s.symbol.st_value;
-                if (syms.count(addr) > 0) {
-                    //log("Symbols ", i, " and ", s.old_idx, " have duplicate addresses.");
-                    if (IS_A_BETTER_THAN_B(s, syms[addr]))
-                        syms[addr] = s;
-                } else {
-                    syms[addr] = s;
-                }
-            }
-        }
+        auto all = in.symtab->symbols;
+        vector<elf_symbol> picked;
 
+        pick(picked, all, [](elf_symbol a) {
+            return ELF32_ST_TYPE(a.symbol.st_info) == STT_FUNC || ELF32_ST_TYPE(a.symbol.st_info) == STT_OBJECT || ELF32_ST_BIND(a.symbol.st_info);
+        });
+
+        set<int> cand;
         for (auto rtab : reltabs)
-            for (auto rel : rtab->rels) {
-                elf_symbol s = in.symtab->symbols[ELF32_R_SYM(rel.r_info)];
-                Elf32_Addr addr = s.symbol.st_value;
-                if (syms.count(addr) > 0 && s.old_idx != syms[addr].old_idx) {
-                    //log("Symbols ", s.old_idx, " and ", syms[addr].old_idx, " have duplicate addresses.");
-                    if (IS_A_BETTER_THAN_B(s, syms[addr]))
-                        syms[addr] = s;
-                } else {
-                    syms[addr] = s;
-                }
-            }
+            for (auto rel : rtab->rels)
+                cand.insert(ELF32_R_SYM(rel.r_info));
+        pick(picked, all, [&](elf_symbol a) {
+            return cand.count(a.old_idx);
+        });
 
         set<int> sym_idxes;
-        for (auto sym : syms)
-            sym_idxes.insert(sym.second.old_idx);
+        for (auto sym : picked)
+            sym_idxes.insert(sym.old_idx);
         return sym_idxes;
     }
 
@@ -374,6 +398,46 @@ namespace {
             }
     }
 
+    void add_rem_symbol(program& in, program& out, elf_symbol& sym) {
+        string sname = in.strtab->str_by_offset(sym.symbol.st_name);
+        if (sym.symbol.st_shndx == SHN_ABS || ELF32_ST_BIND(sym.symbol.st_info) == STB_WEAK) {
+            out.add_symbol(sname, sym);
+            return;
+        }
+
+        // For symbols at the beginning of a 0-sized section.
+        std::pair<int, section*> insec1 = {sym.symbol.st_shndx, in.sections[sym.symbol.st_shndx]};
+        auto insec2 = insec1;//sec_for(in, sym.symbol.st_value, sym.symbol.st_shndx, true);
+        // For symbols exactly after the section.
+        auto outsec1 = sec_for(out, sym.symbol.st_value, sym.symbol.st_shndx);
+        auto outsec2 = sec_for(out, sym.symbol.st_value, sym.symbol.st_shndx, true);
+        if ((insec1.second != nullptr || insec2.second != nullptr)
+            && (outsec1.second != nullptr || outsec2.second != nullptr)) {
+            auto insec = insec1.second == nullptr ? insec2 : insec1;
+            auto outsec = outsec1.second == nullptr ? outsec2 : outsec1;
+            assert(sym.symbol.st_value >= outsec.second->hdr->sh_addr);
+            //string sec_name = in.shstrtab->str_by_offset(insec.second->hdr->sh_name);
+            //string sname = out_section_name(sec_name, sym.symbol);
+            string sname = in.strtab->str_by_offset(sym.symbol.st_name);
+            // For sections of size 0, when changing the size, linker
+            // also changes symbol addresses after the end
+            // of the section. So, for .stack, this is needed
+            if (outsec.second->hdr->sh_type == SHT_NOBITS)
+                sym.symbol.st_value = 0;
+            else
+                sym.symbol.st_value -= outsec.second->hdr->sh_addr;
+            sym.symbol.st_shndx = outsec.first;
+            out.add_symbol(sname, sym);
+        } else {
+            log("Warning: Skipping symbol");
+        }
+    }
+
+    void add_rem_symbols(program& in, program& out, set<int>& nrs) {
+        for (int i : nrs)
+            add_rem_symbol(in, out, in.symtab->symbols[i]);
+    }
+
     void solve(program in, string out) {
         program output{};
         output.ehdr.e_machine = in.ehdr.e_machine;
@@ -384,8 +448,6 @@ namespace {
         set<int> nrs = non_redundant_symbols(in);
         int shndx = 0;
         for (auto s : in.sections) {
-            // sh_align - tylko dla pierwszej sekcji w rozbijanej grupie
-            // sh_entsize - dla specyficzny
             string in_section_name(&in.shstrtab->data[s->hdr->sh_name]);
             if (s->hdr->sh_type == SHT_PROGBITS) {
                 if (in_section_name == ".got") {
@@ -402,37 +464,7 @@ namespace {
         // add a dummy _start symbol, for the sake of e_entry
         add_start_symbol(in, output, nrs);
 
-        for (int i : nrs) {
-            auto sym = in.symtab->symbols[i];
-            if (sym.symbol.st_shndx == SHN_ABS) {
-                //sym.symbol.st_size = output.symtab->symbols.size();
-                //output.symtab->symbols.push_back(sym);
-            } else {
-                // For symbols at the beginning of a 0-sized section.
-                auto insec1 = sec_for(in, sym.symbol.st_value);
-                auto insec2 = sec_for(in, sym.symbol.st_value, true);
-                // For symbols exactly after the section.
-                auto outsec1 = sec_for(output, sym.symbol.st_value);
-                auto outsec2 = sec_for(output, sym.symbol.st_value, true);
-                if ((insec1.second != nullptr || insec2.second != nullptr)
-                    && (outsec1.second != nullptr || outsec2.second != nullptr)) {
-                    auto insec = insec1.second == nullptr ? insec2 : insec1;
-                    auto outsec = outsec1.second == nullptr ? outsec2 : outsec1;
-                    assert(sym.symbol.st_value >= outsec.second->hdr->sh_addr);
-                    string sec_name = in.shstrtab->str_by_offset(insec.second->hdr->sh_name);
-                    string sname = out_section_name(sec_name, sym.symbol);
-                    // For sections of size 0, when changing the size, linker
-                    // also changes symbol addresses after the end
-                    // of the section. So, for .stack, this is needed
-                    if (outsec.second->hdr->sh_type == SHT_NOBITS)
-                        sym.symbol.st_value = 0;
-                    else
-                        sym.symbol.st_value -= outsec.second->hdr->sh_addr;
-                    sym.symbol.st_shndx = outsec.first;
-                    output.add_symbol(sname, sym);
-                }
-            }
-        }
+        add_rem_symbols(in, output, nrs);
 
         add_got_symbol_if_needed(in, output);
         output.sort_symtabs();

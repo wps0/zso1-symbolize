@@ -22,6 +22,11 @@ namespace symbolize {
         data = ndata;
     }
 
+    bool elf_symbol::operator==(elf_symbol s) {
+        return s.symbol.st_info == symbol.st_info && s.symbol.st_value == symbol.st_value
+                && s.symbol.st_shndx == symbol.st_shndx;
+    }
+
     sym_section::sym_section() {
         hdr = new Elf32_Shdr{
             .sh_name = 0,

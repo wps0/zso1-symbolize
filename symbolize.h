@@ -14,6 +14,7 @@ namespace symbolize {
         Elf32_Shdr* hdr;
         char* data = nullptr;
         int data_len = 0;
+        int old_idx = 0;
 
         section();
 
@@ -24,13 +25,14 @@ namespace symbolize {
         Elf32_Sym symbol;
         int old_idx;
         int new_idx;
+
+        bool operator==(elf_symbol s);
     };
 
     class sym_section : public section {
     public:
         sym_section();
         vector<elf_symbol> symbols;
-        int got_off_idx;
     };
 
     class rel_section : public section {
@@ -102,13 +104,47 @@ namespace symbolize {
         std::cout << std::endl;
     }
 
+    const vector<string> linker_generated_symbols = {"__stack",
+"__text_end",
+"__etext",
+"_etext",
+"etext",
+"__preinit_array_start",
+"__preinit_array_end",
+"__init_array_start",
+"__init_array_end",
+"__fini_array_start",
+"__fini_array_end",
+"__preserve_start__",
+"__preserve_end__",
+"__global_pointer$",
+"_gp",
+"__data_start",
+"__data_source",
+"__data_end",
+"__tdata_end",
+"__data_source_end",
+"__edata",
+"_edata",
+"edata",
+"__data_size",
+"__data_source_size",
+"__bss_start",
+"__bss_end",
+"__non_tls_bss_start",
+"__end",
+"_end",
+"end",
+"__bss_size",
+"__heap_start",
+"__heap_end",
+"__heap_size"};
+
+
     auto const SYMTAB_CMP = [](elf_symbol a, elf_symbol b) {
-        if (ELF32_ST_BIND(a.symbol.st_info) == ELF32_ST_BIND(b.symbol.st_info)) {
-            if (a.symbol.st_shndx == b.symbol.st_shndx)
-                return a.symbol.st_value < b.symbol.st_value;
-            return a.symbol.st_shndx < b.symbol.st_shndx;
-        }
-        return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
+        if (ELF32_ST_BIND(a.symbol.st_info) == ELF32_ST_BIND(b.symbol.st_info))
+            return a.old_idx < b.old_idx;
+        return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);;
     };
 
     auto const SYMBOLS_ASC_BY_ADDR_CMP = [](elf_symbol a, elf_symbol b) {
@@ -127,14 +163,6 @@ namespace symbolize {
     };
 
     auto const IS_A_BETTER_THAN_B = [](elf_symbol a, elf_symbol b) {
-        int a_type = ELF32_ST_TYPE(a.symbol.st_info);
-        int b_type = ELF32_ST_TYPE(a.symbol.st_info);
-        if (a.symbol.st_size == b.symbol.st_size) {
-            if (a_type == b_type)
-                return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
-            return a_type == STT_FUNC || a_type == STT_OBJECT;
-        }
-        return a.symbol.st_size > b.symbol.st_size;
     };
 }
 
