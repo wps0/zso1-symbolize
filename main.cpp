@@ -398,39 +398,78 @@ namespace {
             }
     }
 
-    void add_rem_symbol(program& in, program& out, elf_symbol& sym) {
+    pair<int, section*> fdas(program& out, int old_idx) {
+        int i = 0;
+        for (auto s : out.sections) {
+            if (s->old_idx == old_idx)
+                return {i, s};
+            i++;
+        }
+        return {0, nullptr};
+    }
+
+    void add_rem_symbol(program& in, program& out, elf_symbol sym) {
         string sname = in.strtab->str_by_offset(sym.symbol.st_name);
         if (sym.symbol.st_shndx == SHN_ABS || ELF32_ST_BIND(sym.symbol.st_info) == STB_WEAK) {
             out.add_symbol(sname, sym);
             return;
         }
 
-        // For symbols at the beginning of a 0-sized section.
-        std::pair<int, section*> insec1 = {sym.symbol.st_shndx, in.sections[sym.symbol.st_shndx]};
-        auto insec2 = insec1;//sec_for(in, sym.symbol.st_value, sym.symbol.st_shndx, true);
-        // For symbols exactly after the section.
-        auto outsec1 = sec_for(out, sym.symbol.st_value, sym.symbol.st_shndx);
-        auto outsec2 = sec_for(out, sym.symbol.st_value, sym.symbol.st_shndx, true);
-        if ((insec1.second != nullptr || insec2.second != nullptr)
-            && (outsec1.second != nullptr || outsec2.second != nullptr)) {
-            auto insec = insec1.second == nullptr ? insec2 : insec1;
-            auto outsec = outsec1.second == nullptr ? outsec2 : outsec1;
-            assert(sym.symbol.st_value >= outsec.second->hdr->sh_addr);
-            //string sec_name = in.shstrtab->str_by_offset(insec.second->hdr->sh_name);
-            //string sname = out_section_name(sec_name, sym.symbol);
-            string sname = in.strtab->str_by_offset(sym.symbol.st_name);
-            // For sections of size 0, when changing the size, linker
-            // also changes symbol addresses after the end
-            // of the section. So, for .stack, this is needed
-            if (outsec.second->hdr->sh_type == SHT_NOBITS)
-                sym.symbol.st_value = 0;
-            else
-                sym.symbol.st_value -= outsec.second->hdr->sh_addr;
-            sym.symbol.st_shndx = outsec.first;
-            out.add_symbol(sname, sym);
-        } else {
-            log("Warning: Skipping symbol");
+        if (sname == "_GLOBAL_OFFSET_TABLE_") {
+            log("Skipping GOT symbol");
+            return;
         }
+
+        pair<int, section*> outsec = fdas(out, sym.symbol.st_shndx);
+        if (outsec.second == nullptr) {
+            outsec = sec_for(out, sym.symbol.st_value);
+            if (outsec.second == nullptr)
+                outsec = sec_for(out, sym.symbol.st_value, 0, true);
+            if (outsec.second == nullptr) {
+                log("Warning: Skipping symbol");
+                return;
+            }
+        }
+
+        // For sections of size 0, when changing the size, linker
+        // also changes symbol addresses after the end
+        // of the section. So, for .stack, this is needed
+        // if (outsec.second->hdr->sh_type == SHT_NOBITS)
+        //     sym.symbol.st_value = 0;
+        // else
+        if (sname == "__stack") {
+            //sname = out_section_name(".stack", sym.symbol);
+            sym.symbol.st_shndx = 0;
+        } else {
+            sym.symbol.st_value -= outsec.second->hdr->sh_addr;
+            sym.symbol.st_shndx = outsec.first;
+        }
+        out.add_symbol(sname, sym);
+
+        //     // For symbols at the beginning of a 0-sized section.
+        //     std::pair<int, section*> insec1 = {sym.symbol.st_shndx, in.sections[sym.symbol.st_shndx]};
+        //     auto insec2 = insec1;//sec_for(in, sym.symbol.st_value, sym.symbol.st_shndx, true);
+        //     // For symbols exactly after the section.
+        //     auto outsec1 = sec_for(output, sym.symbol.st_value, sym.symbol.st_shndx);
+        //     auto outsec2 = sec_for(output, sym.symbol.st_value, sym.symbol.st_shndx, true);
+        //     if ((insec1.second != nullptr || insec2.second != nullptr)
+        //         && (outsec1.second != nullptr || outsec2.second != nullptr)) {
+        //         auto insec = insec1.second == nullptr ? insec2 : insec1;
+        //         auto outsec = outsec1.second == nullptr ? outsec2 : outsec1;
+        //         assert(sym.symbol.st_value >= outsec.second->hdr->sh_addr);
+        //         //string sec_name = in.shstrtab->str_by_offset(insec.second->hdr->sh_name);
+        //         //string sname = out_section_name(sec_name, sym.symbol);
+        //         string sname = in.strtab->str_by_offset(sym.symbol.st_name);
+        //         if (outsec.second->hdr->sh_type == SHT_NOBITS)
+        //             sym.symbol.st_value = 0;
+        //         else
+        //             sym.symbol.st_value -= outsec.second->hdr->sh_addr;
+        //         sym.symbol.st_shndx = outsec.first;
+        //         output.add_symbol(sname, sym);
+        //     } else {
+        //         log("Warning: Skipping symbol");
+        //     }
+
     }
 
     void add_rem_symbols(program& in, program& out, set<int>& nrs) {
