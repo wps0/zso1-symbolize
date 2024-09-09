@@ -73,7 +73,7 @@ namespace {
         return p.add_rel_section(name, s_idx);
     }
 
-    pair<int, section*> sec_for(program& p, Elf32_Addr addr, int shndx = 0, bool top_addr_incl = false) {
+  pair<int, section*> sec_for(program& p, Elf32_Addr addr, int shndx = 0, bool top_addr_incl = false) {
         if (shndx > 0) {
             int idx = 0;
             for (auto s : p.sections) {
@@ -115,12 +115,23 @@ namespace {
         return {};
     }
 
-    Elf32_Off got_symbol_off(program& in, Elf32_Sym symbol) {
+    // In case addend is non-zero, pick the closest offset to the one from file.
+    Elf32_Off got_symbol_off(program& in, int in_off, Elf32_Sym symbol) {
+        int dis = in_off;
+        int cand = -1;
         for (int i = 0; i < in.got->hdr->sh_size; i += 4) {
             Elf32_Addr* addr = (Elf32_Addr*)&in.got->data[i];
-            if (*addr == symbol.st_value)
-                return i;
+            if (*addr == symbol.st_value && abs(i - in_off) < dis) {
+                dis = abs(i - in_off);
+                cand = i;
+            }
         }
+
+        if (cand > 0) {
+            log("Off with distance=", cand, " found");
+            return cand;
+        }
+
         log("No GOT entry for " + std::to_string(symbol.st_value));
         return symbol.st_value;
     }
@@ -155,7 +166,7 @@ namespace {
         } else if (type == R_386_GOT32) {
             // G - The offset into the global offset table at which the address of the relocation entry's
             //  symbol resides during execution
-            int g = got_symbol_off(in, in.symtab->symbols[out_sym.old_idx].symbol);
+            int g = got_symbol_off(in, *value, in.symtab->symbols[out_sym.old_idx].symbol);
             a = *value - g;
         } else if (type == R_386_PLT32) {
 
@@ -262,7 +273,12 @@ namespace {
                 s_change_addr = addr + ssym.symbol.st_size;
                 ssyms_ptr++;
             } else if (addr == s_change_addr) {
-                current = out.add_section(out_section_name(s_name, addr));
+                string new_sname;
+                if (s_name == ".comment")
+                    new_sname = s_name;
+                else
+                    new_sname = out_section_name(s_name, addr);
+                current = out.add_section(new_sname);
 
                 started_new = true;
                 s_change_addr = max_s_addr;
@@ -445,34 +461,9 @@ namespace {
             sym.symbol.st_shndx = outsec.first;
         }
         out.add_symbol(sname, sym);
-
-        //     // For symbols at the beginning of a 0-sized section.
-        //     std::pair<int, section*> insec1 = {sym.symbol.st_shndx, in.sections[sym.symbol.st_shndx]};
-        //     auto insec2 = insec1;//sec_for(in, sym.symbol.st_value, sym.symbol.st_shndx, true);
-        //     // For symbols exactly after the section.
-        //     auto outsec1 = sec_for(output, sym.symbol.st_value, sym.symbol.st_shndx);
-        //     auto outsec2 = sec_for(output, sym.symbol.st_value, sym.symbol.st_shndx, true);
-        //     if ((insec1.second != nullptr || insec2.second != nullptr)
-        //         && (outsec1.second != nullptr || outsec2.second != nullptr)) {
-        //         auto insec = insec1.second == nullptr ? insec2 : insec1;
-        //         auto outsec = outsec1.second == nullptr ? outsec2 : outsec1;
-        //         assert(sym.symbol.st_value >= outsec.second->hdr->sh_addr);
-        //         //string sec_name = in.shstrtab->str_by_offset(insec.second->hdr->sh_name);
-        //         //string sname = out_section_name(sec_name, sym.symbol);
-        //         string sname = in.strtab->str_by_offset(sym.symbol.st_name);
-        //         if (outsec.second->hdr->sh_type == SHT_NOBITS)
-        //             sym.symbol.st_value = 0;
-        //         else
-        //             sym.symbol.st_value -= outsec.second->hdr->sh_addr;
-        //         sym.symbol.st_shndx = outsec.first;
-        //         output.add_symbol(sname, sym);
-        //     } else {
-        //         log("Warning: Skipping symbol");
-        //     }
-
     }
 
-    void add_rem_symbols(program& in, program& out, set<int>& nrs) {
+    void add_floating_symbols(program& in, program& out, set<int>& nrs) {
         for (int i : nrs)
             add_rem_symbol(in, out, in.symtab->symbols[i]);
     }
@@ -502,13 +493,10 @@ namespace {
 
         // add a dummy _start symbol, for the sake of e_entry
         add_start_symbol(in, output, nrs);
-
-        add_rem_symbols(in, output, nrs);
-
+        add_floating_symbols(in, output, nrs);
         add_got_symbol_if_needed(in, output);
         output.sort_symtabs();
         convert_rels(in, output);
-
         output.save(out);
     }
 }
