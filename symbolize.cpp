@@ -23,6 +23,11 @@ namespace symbolize {
     }
 
     bool elf_symbol::operator==(elf_symbol s) {
+        // Linker-generated symbols are recognised by name
+        if (linker_generated && s.linker_generated)
+            return s.symbol.st_name == symbol.st_name;
+        if (linker_generated || s.linker_generated)
+            return false;
         return s.symbol.st_info == symbol.st_info && s.symbol.st_value == symbol.st_value
                 && s.symbol.st_shndx == symbol.st_shndx;
     }
@@ -33,16 +38,15 @@ namespace symbolize {
             .sh_type = SHT_SYMTAB,
             .sh_flags = 0,
             .sh_addr = 0,
-            .sh_offset = 0, // TODO
+            .sh_offset = 0,
             .sh_size = 0,
-            .sh_link = 0, // TODO strtab
-            .sh_addralign = 0, // TODO?
+            .sh_link = 0,
+            .sh_addralign = 0,
             .sh_entsize = sizeof(Elf32_Sym),
         };
     }
 
     rel_section::rel_section() {
-        // todo: link do symtab
         hdr->sh_type = SHT_REL;
         hdr->sh_flags |= SHF_INFO_LINK;
         hdr->sh_addralign = 4;
@@ -55,10 +59,10 @@ namespace symbolize {
             .sh_type = SHT_STRTAB,
             .sh_flags = 0,
             .sh_addr = 0,
-            .sh_offset = 0, // TODO
+            .sh_offset = 0,
             .sh_size = 0,
             .sh_link = 0,
-            .sh_addralign = 1, // TODO?
+            .sh_addralign = 1,
             .sh_entsize = 0,
         };
     }
@@ -94,18 +98,18 @@ namespace symbolize {
         ehdr = {
             .e_ident = {0x7f, 0x45, 0x4c, 0x46, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
             .e_type = ET_REL,
-            .e_machine = 0, // TODO
-            .e_version = 0, // TODO
-            .e_entry = 0, // TODO
+            .e_machine = 0,
+            .e_version = 0,
+            .e_entry = 0,
             .e_phoff = 0,
-            .e_shoff = 0, // TODO
+            .e_shoff = 0,
             .e_flags = 0,
             .e_ehsize = sizeof(Elf32_Ehdr),
             .e_phentsize = 0,
             .e_phnum = 0,
             .e_shentsize = sizeof(Elf32_Shdr),
-            .e_shnum = 0, // TODO
-            .e_shstrndx = 0 // TODO
+            .e_shnum = 0,
+            .e_shstrndx = 0
         };
     }
 
@@ -199,7 +203,7 @@ namespace symbolize {
                 for (int i = hdr->sh_offset; i < upto; i += hdr->sh_entsize) {
                     Elf32_Rel rel;
                     memcpy(&rel, &raw[i], hdr->sh_entsize);
-                    reltab->rels.push_back(rel);
+                    reltab->rels.emplace_back(elf_rel{.rel = rel, .old_sym = ELF32_R_SYM(rel.r_info)});
                 }
                 s = reltab;
             } else if (idx == this->ehdr.e_shstrndx) {
@@ -220,9 +224,14 @@ namespace symbolize {
         }
 
         // set GOT
-        for (auto s : sections) {
+        for (auto s : sections)
             if (shstrtab->str_by_offset(s->hdr->sh_name) == ".got")
                 got = s;
+
+        // mark linker-generated symbols
+        for (auto& s : symtab->symbols) {
+            string sname = strtab->str_by_offset(s.symbol.st_name);
+            s.linker_generated = linker_generated_symbols.count(sname);
         }
     }
 
@@ -293,7 +302,7 @@ namespace symbolize {
                     shdr()->sh_link = symtab_nr;
                     reltab = (rel_section*) s;
                     for (auto rel: reltab->rels)
-                        buf_add(&raw, raw_len, &rel, sizeof(Elf32_Rel));
+                        buf_add(&raw, raw_len, &rel.rel, sizeof(Elf32_Rel));
                     break;
 
                 case SHT_SYMTAB:
@@ -322,7 +331,6 @@ namespace symbolize {
         }
 
         // e_entry
-
         FILE *f = fopen(file.c_str(), "wb");
         int nwrote = 0;
         do {
@@ -330,6 +338,7 @@ namespace symbolize {
             assert(ret);
             nwrote += ret;
         } while (nwrote < raw_len);
+        fclose(f);
     }
 
     section *program::add_section(string name) {

@@ -16,7 +16,6 @@
 namespace {
     using namespace symbolize;
 
-
     char get_symbol_code(string section_name, Elf32_Sym sym) {
         char code = 'U';
         int binding = ELF32_ST_BIND(sym.st_info);
@@ -64,25 +63,14 @@ namespace {
         assert(s->hdr->sh_type != SHT_REL);
         int s_idx = p.index_of(s);
 
-        for (auto t : p.sections) {
+        for (auto t : p.sections)
             if (t->hdr->sh_type == SHT_REL && t->hdr->sh_info == s_idx)
                 return static_cast<rel_section *>(t);
-        }
-
         auto name = ".rel" + p.shstrtab->str_by_offset(s->hdr->sh_name);
         return p.add_rel_section(name, s_idx);
     }
 
-  pair<int, section*> sec_for(program& p, Elf32_Addr addr, int shndx = 0, bool top_addr_incl = false) {
-        if (shndx > 0) {
-            int idx = 0;
-            for (auto s : p.sections) {
-                if (idx == shndx && s->hdr->sh_addr <= addr && addr <= s->hdr->sh_addr + s->hdr->sh_size)
-                    return {idx, s};
-                idx++;
-            }
-        }
-
+  pair<int, section*> sec_for(program& p, Elf32_Addr addr, bool top_addr_incl = false) {
         int i = 0;
         for (auto s : p.sections) {
             if (s->hdr->sh_addr <= addr && addr < s->hdr->sh_addr + s->hdr->sh_size + top_addr_incl)
@@ -128,7 +116,7 @@ namespace {
         }
 
         if (cand > 0) {
-            log("Off with distance=", cand, " found");
+            //log("Off with distance=", cand, " found");
             return cand;
         }
 
@@ -146,12 +134,9 @@ namespace {
         Elf32_Off p = in_rel.r_offset;
         // GOT - The address of the global offset table.
         Elf32_Off got = 0;
-        // L - The section offset or address of the procedure linkage table entry for a symbol.
-        Elf32_Off l = 0;
 
-        if (in.got != nullptr) {
+        if (in.got != nullptr)
             got = in.got->hdr->sh_addr;
-        }
 
         int type = ELF32_R_TYPE(in_rel.r_info);
         if (type == R_386_32) {
@@ -168,8 +153,6 @@ namespace {
             //  symbol resides during execution
             int g = got_symbol_off(in, *value, in.symtab->symbols[out_sym.old_idx].symbol);
             a = *value - g;
-        } else if (type == R_386_PLT32) {
-
         } else {
             log("Unsupported relo type: ", type);
         }
@@ -181,9 +164,9 @@ namespace {
         auto all_reltabs = in.find_rels();
         for (auto reltab : all_reltabs) {
             for (auto rel : reltab->rels) {
-                int r_sym = ELF32_R_SYM(rel.r_info);
+                unsigned int r_sym = ELF32_R_SYM(rel.rel.r_info);
 
-                auto outsec = sec_for(out, rel.r_offset);
+                auto outsec = sec_for(out, rel.rel.r_offset);
                 auto outrel = rel_for(out, outsec.second);
                 auto outsym = sym_for(in, out, r_sym);
                 if (outsym.has_value() && outsym.value().old_idx == 0) {
@@ -194,11 +177,11 @@ namespace {
                 }
 
                 auto new_rel = Elf32_Rel{
-                    .r_offset = rel.r_offset - outsec.second->hdr->sh_addr,
-                    .r_info = ELF32_R_INFO(outsym->new_idx, ELF32_R_TYPE(rel.r_info)),
+                    .r_offset = rel.rel.r_offset - outsec.second->hdr->sh_addr,
+                    .r_info = ELF32_R_INFO(outsym->new_idx, ELF32_R_TYPE(rel.rel.r_info)),
                 };
-                outrel->rels.push_back(new_rel);
-                fix_segment(in, out, rel, new_rel, outsym.value(), outsec.second);
+                outrel->rels.push_back(elf_rel{.rel = new_rel, .old_sym = r_sym});;
+                fix_segment(in, out, rel.rel, new_rel, outsym.value(), outsec.second);
             }
         }
     }
@@ -222,7 +205,7 @@ namespace {
 
         vector<pair<string, elf_symbol>> no_duplicates;
         for (auto p : present) {
-            // obj lub fun
+            // obj or fun
             bool ok = false;
             for (auto sym: p.second)
                 if (ELF32_ST_TYPE(sym.symbol.st_info) == STT_FUNC || ELF32_ST_TYPE(sym.symbol.st_info) == STT_OBJECT) {
@@ -241,7 +224,7 @@ namespace {
                     }
             }
 
-            // randomowo
+            // random
             if (!ok) {
                 no_duplicates.push_back({p.first, *p.second.begin()});
             }
@@ -259,6 +242,7 @@ namespace {
     void parse_file_and_mem(program& in, program& out, section *s, set<int>& nrs, int shndx) {
         vector<elf_symbol> ssyms = section_symbols_asc(in, shndx);
         vector<elf_symbol> all_syms = in.symbols_in_section_asc(shndx);
+        filter_linker_generated(in, ssyms);
         filter_linker_generated(in, all_syms);
 
         string s_name = in.shstrtab->str_by_offset(s->hdr->sh_name);
@@ -320,8 +304,6 @@ namespace {
 
                 if (nrs.count(in_sym.old_idx) > 0)
                     nrs.erase(in_sym.old_idx);
-                //else
-                    //log("Warning: redundant symbol created");
             }
 
             // update pointers
@@ -346,13 +328,10 @@ namespace {
         int got_idx = 0;
         // GOT symbol
         auto reltabs = in.find_rels();
-        for (auto reltab : reltabs) {
-            for (auto rel : reltab->rels) {
-                if (ELF32_R_TYPE(rel.r_info) == R_386_GOTPC) {
-                    got_idx = ELF32_R_SYM(rel.r_info);
-                }
-            }
-        }
+        for (auto reltab : reltabs)
+            for (auto rel : reltab->rels)
+                if (ELF32_R_TYPE(rel.rel.r_info) == R_386_GOTPC)
+                    got_idx = ELF32_R_SYM(rel.rel.r_info);
 
         if (got_idx > 0) {
             log("The file contains .got");
@@ -394,7 +373,8 @@ namespace {
         set<int> cand;
         for (auto rtab : reltabs)
             for (auto rel : rtab->rels)
-                cand.insert(ELF32_R_SYM(rel.r_info));
+                cand.insert(ELF32_R_SYM(rel.rel.r_info));
+
         pick(picked, all, [&](elf_symbol a) {
             return cand.count(a.old_idx);
         });
@@ -435,13 +415,11 @@ namespace {
 
     void add_rem_symbol(program& in, program& out, elf_symbol sym) {
         string sname = in.strtab->str_by_offset(sym.symbol.st_name);
-        // ABS symbols are usually linker-generated, so let him fill all the
-        // details.
+        // ABS symbols are usually linker-generated
         if (sym.symbol.st_shndx == SHN_ABS || linker_generated_symbols.count(sname)) {
             sym.symbol.st_shndx = SHN_UNDEF;
             sym.symbol.st_value = 0;
 
-            // TODO: UPEWNIC SIE CZY NIE MA LITEROWEK!
             // Symbols declared in linker script using PROVIDE_HIDDEN are global and hidden in EL_RELs,
             // but local and default in ET_EXEC (GCC ld specific).
             // https://github.com/llvm/llvm-project/issues/92116
@@ -470,26 +448,15 @@ namespace {
         if (outsec.second == nullptr) {
             outsec = sec_for(out, sym.symbol.st_value);
             if (outsec.second == nullptr)
-                outsec = sec_for(out, sym.symbol.st_value, 0, true);
+                outsec = sec_for(out, sym.symbol.st_value, true);
             if (outsec.second == nullptr) {
                 log("Warning: Skipping symbol");
                 return;
             }
         }
 
-        // For sections of size 0, when changing the size, linker
-        // also changes symbol addresses after the end
-        // of the section. So, for .stack, this is needed
-        // if (outsec.second->hdr->sh_type == SHT_NOBITS)
-        //     sym.symbol.st_value = 0;
-        // else
-        if (sname == "__stack") {
-            //sname = out_section_name(".stack", sym.symbol);
-            sym.symbol.st_shndx = 0;
-        } else {
-            sym.symbol.st_value -= outsec.second->hdr->sh_addr;
-            sym.symbol.st_shndx = outsec.first;
-        }
+        sym.symbol.st_value -= outsec.second->hdr->sh_addr;
+        sym.symbol.st_shndx = outsec.first;
         out.add_symbol(sname, sym);
     }
 
@@ -507,15 +474,14 @@ namespace {
         int idx = 0;
         Elf32_Sword* addend = (Elf32_Sword*)&outsec->data[rel.r_offset];
         auto base_sym = in.symtab->symbols[out.symtab->symbols[symidx].old_idx].symbol;
-
+        const long long tgt = base_sym.st_value + *addend;
         for (auto s : out.symtab->symbols) {
             auto s_old = in.symtab->symbols[s.old_idx].symbol;
-            Elf32_Sword dif = base_sym.st_value - s_old.st_value;
-            if (abs(dif) <= abs(*addend) && sgn(*addend) == sgn(dif)) {
-                log("lift ", symidx, " (", base_sym.st_value, ")", " -> ", idx, " (", s_old.st_value, ") addend old ", *addend, " addend new", *addend - dif);
+            long long dif = tgt - s_old.st_value;
+            if (abs(dif) < abs(*addend) && sgn(dif) >= 0) {
+                //log("lift ", symidx, " (", base_sym.st_value, ")", " -> ", idx, " (", s_old.st_value, ") addend old ", *addend, " addend new", dif);
                 symidx = idx;
-                base_sym = s_old;
-                *addend += dif;
+                *addend = dif;
             }
             idx++;
         }
@@ -523,51 +489,56 @@ namespace {
     }
 
     // Change the symbols relocations reference to to minimise addend,
-    // which remains static, thus causing problems when a section between rel symbol
-    // and r_value is replaced by smaller/larger one and when a relocation depends
-    // on the file position (R_386_PC32, R_386_GOTPC).
+    // which remains static, causing problems when a section between rel symbol
+    // and r_value is replaced by smaller/larger one.
     void lift_rel_referenced_symbols(program& in, program& out) {
-        for (auto rs : out.find_rels())
+        for (auto rs : out.find_rels()) {
             for (auto& r : rs->rels) {
-                int type = ELF32_R_TYPE(r.r_info);
+                if (ELF32_ST_TYPE(in.symtab->symbols[r.old_sym].symbol.st_info) != STT_SECTION)
+                    continue;
                 section* outsec = out.sections[rs->hdr->sh_info];
-                if (type == R_386_PC32 || type == R_386_GOTPC)
-                    lift_rel_referenced_symbol(in, out, r, outsec);
+                lift_rel_referenced_symbol(in, out, r.rel, outsec);
             }
-
+        }
     }
 
-    void solve(program in, string out) {
-        program output{};
-        output.ehdr.e_machine = in.ehdr.e_machine;
-        output.ehdr.e_version = in.ehdr.e_version;
-        output.ehdr.e_entry = in.ehdr.e_entry;
-        output.init();
-
-        set<int> nrs = non_redundant_symbols(in);
+    void symbolise_sections(program& in, program& out, set<int>& nrs) {
         int shndx = 0;
         for (auto s : in.sections) {
             string in_section_name(&in.shstrtab->data[s->hdr->sh_name]);
+            log("Symbolizing ", in_section_name);
             if (s->hdr->sh_type == SHT_PROGBITS) {
-                if (in_section_name == ".got") {
-                    // skip the section
-                } else {
-                    parse_file_and_mem(in, output, s, nrs, shndx);
+                // linker will create .got
+                if (in_section_name != ".got") {
+                    parse_file_and_mem(in, out, s, nrs, shndx);
                 }
             } else if (s->hdr->sh_type == SHT_NOBITS) {
-                parse_mem(in, output, in_section_name, s, shndx);
+                parse_mem(in, out, in_section_name, s, shndx);
             }
             shndx++;
         }
+    }
 
-        // add a dummy _start symbol, for the sake of e_entry
-        add_start_symbol(in, output, nrs);
-        add_floating_symbols(in, output, nrs);
-        add_got_symbol_if_needed(in, output);
-        output.sort_symtabs();
-        convert_rels(in, output);
-        lift_rel_referenced_symbols(in, output);
-        output.save(out);
+    void solve(program in, string output_location) {
+        program out{};
+        out.ehdr.e_machine = in.ehdr.e_machine;
+        out.ehdr.e_version = in.ehdr.e_version;
+        out.ehdr.e_entry = in.ehdr.e_entry;
+        out.init();
+
+        set<int> nrs = non_redundant_symbols(in);
+        symbolise_sections(in, out, nrs);
+        // Add a dummy _start symbol, for the sake of e_entry
+        add_start_symbol(in, out, nrs);
+        // Add the remaining symbols
+        add_floating_symbols(in, out, nrs);
+        // _GLOBAL_OFFSET_TABLE_ placeholder
+        add_got_symbol_if_needed(in, out);
+        // local symbols go first
+        out.sort_symtabs();
+        convert_rels(in, out);
+        lift_rel_referenced_symbols(in, out);
+        out.save(output_location);
     }
 }
 

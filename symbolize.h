@@ -26,8 +26,14 @@ namespace symbolize {
         Elf32_Sym symbol;
         int old_idx;
         int new_idx;
+        bool linker_generated = false;
 
         bool operator==(elf_symbol s);
+    };
+
+    struct elf_rel {
+        Elf32_Rel rel;
+        unsigned int old_sym = 0;
     };
 
     class sym_section : public section {
@@ -39,7 +45,7 @@ namespace symbolize {
     class rel_section : public section {
     public:
         rel_section();
-        vector<Elf32_Rel> rels;
+        vector<elf_rel> rels;
     };
 
     // strtab - jak dziala ten offset?
@@ -141,7 +147,6 @@ namespace symbolize {
 "__heap_end",
 "__heap_size"};
 
-
     auto const SYMTAB_CMP = [](elf_symbol a, elf_symbol b) {
         if (ELF32_ST_BIND(a.symbol.st_info) == ELF32_ST_BIND(b.symbol.st_info))
             return a.old_idx < b.old_idx;
@@ -161,9 +166,6 @@ namespace symbolize {
         if (b_type == STT_FUNC || b_type == STT_OBJECT)
             return false;
         return ELF32_ST_BIND(a.symbol.st_info) < ELF32_ST_BIND(b.symbol.st_info);
-    };
-
-    auto const IS_A_BETTER_THAN_B = [](elf_symbol a, elf_symbol b) {
     };
 }
 
