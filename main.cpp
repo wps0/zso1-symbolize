@@ -249,9 +249,18 @@ namespace {
         return no_duplicates;
     }
 
+    void filter_linker_generated(program& in, vector<elf_symbol>& all) {
+        std::remove_if(all.begin(), all.end(), [&](elf_symbol sym) {
+            string name = in.strtab->str_by_offset(sym.symbol.st_name);
+            return linker_generated_symbols.count(name);
+        });
+    }
+
     void parse_file_and_mem(program& in, program& out, section *s, set<int>& nrs, int shndx) {
         vector<elf_symbol> ssyms = section_symbols_asc(in, shndx);
         vector<elf_symbol> all_syms = in.symbols_in_section_asc(shndx);
+        filter_linker_generated(in, all_syms);
+
         string s_name = in.shstrtab->str_by_offset(s->hdr->sh_name);
         const Elf32_Addr max_s_addr = s->hdr->sh_size + s->hdr->sh_addr;
 
@@ -414,7 +423,7 @@ namespace {
             }
     }
 
-    pair<int, section*> fdas(program& out, int old_idx) {
+    pair<int, section*> find_outsec(program& out, int old_idx) {
         int i = 0;
         for (auto s : out.sections) {
             if (s->old_idx == old_idx)
@@ -426,7 +435,28 @@ namespace {
 
     void add_rem_symbol(program& in, program& out, elf_symbol sym) {
         string sname = in.strtab->str_by_offset(sym.symbol.st_name);
-        if (sym.symbol.st_shndx == SHN_ABS || ELF32_ST_BIND(sym.symbol.st_info) == STB_WEAK) {
+        // ABS symbols are usually linker-generated, so let him fill all the
+        // details.
+        if (sym.symbol.st_shndx == SHN_ABS || linker_generated_symbols.count(sname)) {
+            sym.symbol.st_shndx = SHN_UNDEF;
+            sym.symbol.st_value = 0;
+
+            // TODO: UPEWNIC SIE CZY NIE MA LITEROWEK!
+            // Symbols declared in linker script using PROVIDE_HIDDEN are global and hidden in EL_RELs,
+            // but local and default in ET_EXEC (GCC ld specific).
+            // https://github.com/llvm/llvm-project/issues/92116
+            if (sname == "__fini_array_start" || sname == "__fini_array_end"
+                || sname == "__init_array_start" || sname == "__init_array_end"
+                || sname == "__preinit_array_start" || sname == "__preinit_array_end") {
+                sym.symbol.st_other = STV_HIDDEN;
+                sym.symbol.st_info = ELF32_ST_INFO(STB_GLOBAL, ELF32_ST_TYPE(sym.symbol.st_info));
+            }
+
+            out.add_symbol(sname, sym);
+            return;
+        }
+
+        if (ELF32_ST_BIND(sym.symbol.st_info) == STB_WEAK) {
             out.add_symbol(sname, sym);
             return;
         }
@@ -436,7 +466,7 @@ namespace {
             return;
         }
 
-        pair<int, section*> outsec = fdas(out, sym.symbol.st_shndx);
+        pair<int, section*> outsec = find_outsec(out, sym.symbol.st_shndx);
         if (outsec.second == nullptr) {
             outsec = sec_for(out, sym.symbol.st_value);
             if (outsec.second == nullptr)
@@ -468,6 +498,45 @@ namespace {
             add_rem_symbol(in, out, in.symtab->symbols[i]);
     }
 
+    inline int sgn(int x) {
+        return (x > 0) - (x < 0);
+    }
+
+    void lift_rel_referenced_symbol(program& in, program& out, Elf32_Rel& rel, section* outsec) {
+        int symidx = ELF32_R_SYM(rel.r_info);
+        int idx = 0;
+        Elf32_Sword* addend = (Elf32_Sword*)&outsec->data[rel.r_offset];
+        auto base_sym = in.symtab->symbols[out.symtab->symbols[symidx].old_idx].symbol;
+
+        for (auto s : out.symtab->symbols) {
+            auto s_old = in.symtab->symbols[s.old_idx].symbol;
+            Elf32_Sword dif = base_sym.st_value - s_old.st_value;
+            if (abs(dif) <= abs(*addend) && sgn(*addend) == sgn(dif)) {
+                log("lift ", symidx, " (", base_sym.st_value, ")", " -> ", idx, " (", s_old.st_value, ") addend old ", *addend, " addend new", *addend - dif);
+                symidx = idx;
+                base_sym = s_old;
+                *addend += dif;
+            }
+            idx++;
+        }
+        rel.r_info = ELF32_R_INFO(symidx, ELF32_R_TYPE(rel.r_info));
+    }
+
+    // Change the symbols relocations reference to to minimise addend,
+    // which remains static, thus causing problems when a section between rel symbol
+    // and r_value is replaced by smaller/larger one and when a relocation depends
+    // on the file position (R_386_PC32, R_386_GOTPC).
+    void lift_rel_referenced_symbols(program& in, program& out) {
+        for (auto rs : out.find_rels())
+            for (auto& r : rs->rels) {
+                int type = ELF32_R_TYPE(r.r_info);
+                section* outsec = out.sections[rs->hdr->sh_info];
+                if (type == R_386_PC32 || type == R_386_GOTPC)
+                    lift_rel_referenced_symbol(in, out, r, outsec);
+            }
+
+    }
+
     void solve(program in, string out) {
         program output{};
         output.ehdr.e_machine = in.ehdr.e_machine;
@@ -497,6 +566,7 @@ namespace {
         add_got_symbol_if_needed(in, output);
         output.sort_symtabs();
         convert_rels(in, output);
+        lift_rel_referenced_symbols(in, output);
         output.save(out);
     }
 }

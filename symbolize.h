@@ -3,6 +3,7 @@
 #include <elf.h>
 #include <functional>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -104,7 +105,7 @@ namespace symbolize {
         std::cout << std::endl;
     }
 
-    const vector<string> linker_generated_symbols = {"__stack",
+    const set<string> linker_generated_symbols = {"__stack",
 "__text_end",
 "__etext",
 "_etext",
