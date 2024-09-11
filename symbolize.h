@@ -61,6 +61,11 @@ namespace symbolize {
     class program {
     public:
         program();
+        program(program&) = delete;
+        program(program const&) = delete;
+        program(program&&) = delete;
+        program(program const&&) = delete;
+        ~program();
 
         Elf32_Ehdr ehdr{};
         vector<section*> sections;

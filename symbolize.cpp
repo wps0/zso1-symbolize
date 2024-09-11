@@ -4,7 +4,6 @@
 #include <cassert>
 #include <cstring>
 #include <functional>
-#include <map>
 
 namespace symbolize {
     section::section() {
@@ -111,6 +110,22 @@ namespace symbolize {
             .e_shnum = 0,
             .e_shstrndx = 0
         };
+    }
+
+    program::~program() {
+        for (auto ptr : sections) {
+            if (ptr->hdr->sh_type == SHT_REL)
+                delete (rel_section*)ptr;
+            else if (ptr->hdr->sh_type == SHT_SYMTAB)
+                delete (sym_section*)ptr;
+            else if (ptr->hdr->sh_type == SHT_STRTAB)
+                delete (str_section*)ptr;
+            else
+                delete ptr;
+        }
+        for (auto ptr : phdrs)
+            delete ptr;
+        delete[] raw;
     }
 
     void program::init() {
@@ -240,8 +255,10 @@ namespace symbolize {
         if (len <= 0)
             return;
         char *nbuf = new char[buf_sz + len];
-        if (buf_sz > 0)
+        if (buf_sz > 0) {
             memcpy(nbuf, *buf, buf_sz);
+            delete[] *buf;
+        }
         memcpy(nbuf + buf_sz, data, len);
         buf_sz += len;
         *buf = nbuf;

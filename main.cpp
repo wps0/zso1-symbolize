@@ -519,7 +519,7 @@ namespace {
         }
     }
 
-    void solve(program in, string output_location) {
+    void solve(program& in, string output_location) {
         program out{};
         out.ehdr.e_machine = in.ehdr.e_machine;
         out.ehdr.e_version = in.ehdr.e_version;
