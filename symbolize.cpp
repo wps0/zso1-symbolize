@@ -10,12 +10,18 @@ namespace symbolize {
         hdr = new Elf32_Shdr{};
     }
 
+    section::~section() {
+        delete hdr;
+    }
+
     void section::append(char const *mem, int len) {
         if (len == 0)
             return;
         char *ndata = new char[len + data_len];
-        if (data_len > 0)
+        if (data_len > 0) {
             memcpy(ndata, data, data_len);
+            delete[] data;
+        }
         memcpy(ndata + data_len, mem, len);
         data_len += len;
         data = ndata;
@@ -32,6 +38,7 @@ namespace symbolize {
     }
 
     sym_section::sym_section() {
+        delete hdr;
         hdr = new Elf32_Shdr{
             .sh_name = 0,
             .sh_type = SHT_SYMTAB,
@@ -53,6 +60,7 @@ namespace symbolize {
     }
 
     str_section::str_section() {
+        delete hdr;
         hdr = new Elf32_Shdr{
             .sh_name = 0,
             .sh_type = SHT_STRTAB,

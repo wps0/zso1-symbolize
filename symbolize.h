@@ -18,6 +18,11 @@ namespace symbolize {
         int old_idx = 0;
 
         section();
+        ~section();
+        section(section&) = delete;
+        section(section const&) = delete;
+        section(section&&) = delete;
+        section(section const&&) = delete;
 
         void append(char const *mem, int len);
     };
