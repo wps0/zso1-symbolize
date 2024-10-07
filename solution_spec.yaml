@@ -1,0 +1,6 @@
+task:
+  # ony of: 'binary', 'strip', 'function_symbols', 'symbols', 'add_relocations'
+  strip_level: add_relocations
+
+solution:
+  ld_extra_flags:

@@ -1,0 +1,51 @@
+## Opis
+Rozwiązanie za 3 pkt. W skrócie:
+1. dodanie symboli:
+    - przenoszenie sekcji i dodanie symboli (symbolise_sections)
+    - dodanie symbolu _start (add_start_symbol)
+    - dodanie symboli niezwiązanych z fizycznymi sekcjami (add_floating_symbols)
+    - dodanie _GLOBAL_OFFSET_TABLE_
+2. przeniesienie relokacji:
+    - zmiana zawartosci segmenów i dodanie relokacji (convert_rels)
+    - zmiana targetu relokacji, które mają duży addend (tych przypisanych bezpośrednio do sekcji) na najbliższy symbol do (target + addend); celem jest odpornośc na przesuwanie sekcji przez linker po podmianie na sekcję o innym rozmiarze niż wyjściowa (lift_rel_referenced_symbols)
+
+
+## Testy
+U mnie przechodzą testy:
+`
+Test name           : C | REL sc |Mat|ReX|Sub| fin
+0a                  : ✔ | ✔ 1.00 | ✔ | ✔ | ✔ | 1.000
+0b                  : ✔ | ✔ 1.00 | ✔ | ✔ | ✔ | 1.000
+0c                  : ✔ | ✔ 1.00 | ✘ | ✘ | ✘ | 0.167
+1-examples-a        : ✔ | ✘ 1.00 | ✔ | ✔ | ✔ | 1.000
+10-embench-qrduino  : ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+11-libc-with-plt    : ✘ | ✘ 0.00 | ✘ | ✘ | ✘ | 0.000
+12-tricky-plt       : ✘ | ✘ 0.00 | ✘ | ✘ | ✘ | 0.000
+13-examples-a-O2    : ✔ | ✔ 1.00 | ✘ | ✔ | ✔ | 0.333
+14-examples-a-pic   : ✔ | ✘ 1.00 | ✔ | ✔ | ✔ | 1.000
+15-c-objects        : ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+16-c-objects        : ✔ | ✘ 1.00 | ✔ | ✔ | ✔ | 1.000
+17-examples-b-nopic : ✔ | ✘ 1.00 | ✔ | ✔ | ✘ | 0.500
+18-examples-question: ✔ | ✘ 1.00 | ✔ | ✔ | ✔ | 1.000
+3-embench-libedn    : ✔ | ✘ 1.00 | ✔ | ✔ | ✔ | 1.000
+4-examples-b        : ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+5-embench-huffbench : ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+6-embench-neetle-aes: ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+7-embench-wikisort  : ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+8-embench-sglib-comb: ✔ | ✘ 1.00 | ✘ | ✔ | ✘ | 0.167
+9-embench-picojpeg  : ✔ | ✘ 1.00 | ✘ | ✔ | ✔ | 0.333
+`
+Warte łącznie 10.831 pkt
+
+---
+
+Testy Mat nie przechodzą, bo GOT jest przepermutowane.
+Test 17 jest zepsuty: `Symbol __printf_float not found in tests/17-examples-b-nopic/b.elf`
+Test 8 również: podmieniane symbole znajdują się w sekcji .text, natomiast skrypt tworzy nazwę kończącą się na 'b', co sugeruje .bss. `nm` dla tego symbolu daje `T` i tak samo mój program.
+Testy 0c, 11, 12 - mój program nie obsługuje PLT.
+
+---
+
+**UWAGA**: W programie prawdopodobnie korzystam gdzieś z undefined behaviour. Gdyby coś nie działało, proszę spróbować zaktualizować paczki do najnowszej wersji. U mnie na obrazie z labów działa, ale nie na domyślnym solution_spec.yaml.
+
+Do uruchomienia konieczny cmake.
